@@ -1,3 +1,4 @@
+
 export default {
     async fetch(request, env) {
         const url = new URL(request.url);
@@ -8,10 +9,10 @@ export default {
         }
 
         const roomId = parts[1];
-        const name = url.searchParams.get("name") || "Anonymous";
 
         const id = env.ROOMS.idFromName(roomId);
         const stub = env.ROOMS.get(id);
+
         return stub.fetch(request);
     }
 };
@@ -23,56 +24,81 @@ export class Room {
     }
 
     async fetch(request) {
-        if (request.headers.get("Upgrade") !== "websocket") {
+        if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
             return new Response("Expected WebSocket", { status: 426 });
         }
 
         const url = new URL(request.url);
         const name = url.searchParams.get("name") || "Anonymous";
-        const userId = url.searchParams.get("userId");
 
-        for (const [id, session] of this.sessions) {
-            if (session.userId === userId) {
-                try { session.ws.close(1000, "Reconnecting"); } catch {}
-                this.sessions.delete(id);
-            }
-        }
         const [client, server] = Object.values(new WebSocketPair());
+
         server.accept();
 
         const sessionId = crypto.randomUUID();
-        this.sessions.set(sessionId, { ws: server, name, userId });
 
-        this.broadcast({ type: "joined", user: name }, sessionId);
+        this.sessions.set(sessionId, {
+            ws: server,
+            name
+        });
+
+        this.broadcast({
+            type: "joined",
+            user: name
+        }, sessionId);
+
         this.broadcast({
             type: "members",
             members: [...this.sessions.values()].map(s => s.name)
         }, null);
 
-        server.addEventListener("message", evt => {
+        server.addEventListener("message", event => {
             try {
-                const msg = JSON.parse(evt.data);
+                const msg = JSON.parse(event.data);
                 this.broadcast(msg, sessionId);
-            } catch {}
+            } catch (error) {
+                console.error("Invalid WebSocket message:", error);
+            }
         });
 
         server.addEventListener("close", () => {
+            const session = this.sessions.get(sessionId);
+
+            if (!session) return;
+
             this.sessions.delete(sessionId);
-            this.broadcast({ type: "left", user: name }, sessionId);
+
+            this.broadcast({
+                type: "left",
+                user: name
+            }, sessionId);
+
             this.broadcast({
                 type: "members",
                 members: [...this.sessions.values()].map(s => s.name)
             }, null);
         });
 
-        return new Response(null, { status: 101, webSocket: client });
+        server.addEventListener("error", () => {
+            this.sessions.delete(sessionId);
+        });
+
+        return new Response(null, {
+            status: 101,
+            webSocket: client
+        });
     }
 
     broadcast(msg, excludeId) {
         const data = JSON.stringify(msg);
+
         for (const [id, session] of this.sessions) {
             if (id !== excludeId) {
-                try { session.ws.send(data); } catch {}
+                try {
+                    session.ws.send(data);
+                } catch (error) {
+                    this.sessions.delete(id);
+                }
             }
         }
     }
